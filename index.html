@@ -3,175 +3,296 @@
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <style>
-body {
-  margin:0;
-  background:black;
-  color:#00ff99;
-  font-family:monospace;
-}
-#top {
-  padding:10px;
-  display:flex;
-  justify-content:space-between;
-}
-#price {
-  font-size:28px;
-}
-button {
-  background:#111;
-  color:#0f0;
-  border:1px solid #0f0;
-  padding:5px;
-}
-canvas {
-  width:100%;
-  height:300px;
-  background:#000;
-}
-#signals {
-  padding:10px;
-}
+body { background:black; color:#00ff99; font-family:monospace; margin:0; }
+#top { padding:10px; display:flex; justify-content:space-between; }
+#price { font-size:26px; }
+button { padding:8px; margin:4px; }
+#chart { width:100%; height:250px; background:#000; }
+#panel { padding:10px; }
+#trades { max-height:150px; overflow:auto; border-top:1px solid #0f0; }
 </style>
 </head>
 
 <body>
 
 <div id="top">
-  <div id="price">Loading...</div>
-  <div>
-    <button onclick="toggleMode()">Mode: Direct</button>
-  </div>
+<div id="price">Loading...</div>
+<div>
+<button onclick="toggleAuto()">Auto</button>
+<button onclick="toggleSession()">Session</button>
+</div>
 </div>
 
 <canvas id="chart"></canvas>
 
-<div id="signals">
-  Signal: <span id="signal">WAIT</span><br>
-  Winrate: <span id="winrate">0%</span>
+<div id="panel">
+Signal: <span id="signal">WAIT</span><br>
+Confidence: <span id="conf">0%</span><br>
+Winrate: <span id="winrate">0%</span><br>
+Balance: $<span id="balance">1000</span><br>
+Best Tier: <span id="bestTier">--</span><br>
+Best Session: <span id="bestSession">--</span><br>
+Best Time: <span id="bestTime">--</span>
 </div>
+
+<div id="panel">
+80%: <span id="wr80">0%</span><br>
+85%: <span id="wr85">0%</span><br>
+90%: <span id="wr90">0%</span><br>
+95%: <span id="wr95">0%</span><br>
+100%: <span id="wr100">0%</span>
+</div>
+
+<div id="trades"></div>
 
 <script>
 
 // ===== SETTINGS =====
-let mode = "direct"; // direct or server
-let serverURL = "https://https://btc-server-3eh2.onrender.com"; // YOUR SERVER
+let autoMode = true;
+let sessionFilter = true;
+let bestTierOnly = true;
+
+let balance = 1000;
+let takeProfit = 0.002;
+let stopLoss = 0.001;
 
 // ===== DATA =====
-let price = 0;
+let tradePrice = 0;
+let markPrice = 0;
+let finalPrice = 0;
 let prices = [];
 let trades = [];
-let wins = 0;
-let losses = 0;
+
+// ===== TRACKING =====
+let tiers = {
+80:{w:0,l:0},85:{w:0,l:0},90:{w:0,l:0},
+95:{w:0,l:0},100:{w:0,l:0}
+};
+
+let sessionStats = { NY:{w:0,l:0}, London:{w:0,l:0} };
+let hourlyStats = {};
+
+// ===== PRICE ENGINE =====
+function updatePrice(){
+finalPrice = (markPrice*0.7)+(tradePrice*0.3);
+
+prices.push(finalPrice);
+if(prices.length>200) prices.shift();
+
+document.getElementById("price").innerText="$"+finalPrice.toFixed(2);
+
+drawChart();
+checkSignal();
+}
 
 // ===== CHART =====
-const canvas = document.getElementById("chart");
-const ctx = canvas.getContext("2d");
+const ctx = document.getElementById("chart").getContext("2d");
 
 function drawChart(){
-  ctx.clearRect(0,0,canvas.width,canvas.height);
+ctx.clearRect(0,0,300,250);
+if(prices.length<5)return;
 
-  if(prices.length < 2) return;
+let max=Math.max(...prices);
+let min=Math.min(...prices);
 
-  let max = Math.max(...prices);
-  let min = Math.min(...prices);
+for(let i=1;i<prices.length;i++){
+let open=prices[i-1];
+let close=prices[i];
 
-  ctx.beginPath();
-  prices.forEach((p,i)=>{
-    let x = (i/prices.length)*canvas.width;
-    let y = canvas.height - ((p-min)/(max-min))*canvas.height;
-    if(i===0) ctx.moveTo(x,y);
-    else ctx.lineTo(x,y);
-  });
+let x=i*2;
+let y1=250-(open-min)/(max-min)*250;
+let y2=250-(close-min)/(max-min)*250;
 
-  ctx.strokeStyle="#00ff99";
-  ctx.stroke();
+ctx.beginPath();
+ctx.moveTo(x,y1);
+ctx.lineTo(x,y2);
+ctx.strokeStyle=close>open?"#0f0":"#f00";
+ctx.stroke();
+}
 }
 
-// ===== SIGNAL LOGIC =====
+// ===== SESSION =====
+function getSession(){
+let h=new Date().getHours();
+if(h>=8&&h<=11) return "NY";
+if(h>=2&&h<=5) return "London";
+return "Off";
+}
+
+function goodTime(){
+if(!sessionFilter) return true;
+return getSession()!=="Off";
+}
+
+// ===== CONFIDENCE =====
+function getConfidence(move,vol){
+return Math.min(100,(Math.abs(move)*8000)+(vol*200));
+}
+
+// ===== SIGNAL =====
 function checkSignal(){
-  if(prices.length < 20) return;
 
-  let last = prices[prices.length-1];
-  let prev = prices[prices.length-10];
+if(prices.length<30) return;
+if(!goodTime()) return;
 
-  if(last > prev){
-    document.getElementById("signal").innerText = "BUY";
-    trades.push({type:"buy",price:last});
-  } else if(last < prev){
-    document.getElementById("signal").innerText = "SELL";
-    trades.push({type:"sell",price:last});
-  } else {
-    document.getElementById("signal").innerText = "WAIT";
-  }
+let last=prices.at(-1);
+let prev=prices.at(-15);
 
-  updateWinrate();
+let move=(last-prev)/prev;
+let vol=Math.abs(prices.at(-1)-prices.at(-2));
+
+let conf=getConfidence(move,vol);
+document.getElementById("conf").innerText=conf.toFixed(0)+"%";
+
+let signal="WAIT";
+if(move>0.001) signal="BUY";
+if(move<-0.001) signal="SELL";
+
+document.getElementById("signal").innerText=signal;
+
+// ===== BEST TIER FILTER =====
+let tier=Math.floor(conf/5)*5;
+let bestTier=document.getElementById("bestTier").innerText.replace("%","");
+
+if(bestTierOnly && bestTier!=="--" && tier!=bestTier){
+return;
 }
 
-// ===== WINRATE =====
-function updateWinrate(){
-  if(trades.length < 2) return;
-
-  let last = trades[trades.length-1];
-  let prev = trades[trades.length-2];
-
-  if(last.type === "sell" && prev.type === "buy"){
-    if(last.price > prev.price) wins++;
-    else losses++;
-  }
-
-  let total = wins + losses;
-  let rate = total ? ((wins/total)*100).toFixed(1) : 0;
-
-  document.getElementById("winrate").innerText = rate + "%";
+if(signal!=="WAIT"){
+executeTrade(signal,last,conf);
+}
 }
 
-// ===== MODE TOGGLE =====
-function toggleMode(){
-  mode = mode === "direct" ? "server" : "direct";
-  alert("Mode: " + mode);
+// ===== TRADE =====
+function executeTrade(type,entry,conf){
+
+let active=true;
+
+let interval=setInterval(()=>{
+
+let current=finalPrice;
+let move=(current-entry)/entry;
+if(type==="SELL") move*=-1;
+
+// TP
+if(move>=takeProfit){
+finishTrade(current,entry,type,conf);
+clearInterval(interval);
 }
 
-// ===== DIRECT MODE (FASTEST) =====
-let ws;
-
-function startDirect(){
-  ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@trade");
-
-  ws.onmessage = (msg)=>{
-    let data = JSON.parse(msg.data);
-    price = parseFloat(data.p);
-
-    update(price);
-  };
+// SL
+if(move<=-stopLoss){
+finishTrade(current,entry,type,conf);
+clearInterval(interval);
 }
 
-// ===== SERVER MODE =====
-async function startServer(){
-  setInterval(async ()=>{
-    let res = await fetch(serverURL);
-    let data = await res.json();
-    price = data.price;
-    update(price);
-  },1000);
+// EARLY EXIT
+if(Math.abs(move)<0.0002 && !active){
+finishTrade(current,entry,type,conf);
+clearInterval(interval);
 }
 
-// ===== UPDATE LOOP =====
-function update(p){
-  prices.push(p);
-  if(prices.length > 200) prices.shift();
-
-  document.getElementById("price").innerText = "$" + p.toFixed(2);
-
-  drawChart();
-  checkSignal();
+},200);
 }
 
-// ===== START =====
-if(mode === "direct"){
-  startDirect();
-} else {
-  startServer();
+// ===== FINISH TRADE =====
+function finishTrade(exit,entry,type,conf){
+
+let pnl=((exit-entry)/entry)*1000;
+if(type==="SELL") pnl*=-1;
+
+balance+=pnl;
+
+// tier
+let tier=Math.floor(conf/5)*5;
+if(tiers[tier]){
+if(pnl>0) tiers[tier].w++;
+else tiers[tier].l++;
 }
+
+// session
+let s=getSession();
+if(sessionStats[s]){
+if(pnl>0) sessionStats[s].w++;
+else sessionStats[s].l++;
+}
+
+// hour
+let h=new Date().getHours();
+if(!hourlyStats[h]) hourlyStats[h]={w:0,l:0};
+if(pnl>0) hourlyStats[h].w++;
+else hourlyStats[h].l++;
+
+trades.unshift(`${type} | ${conf.toFixed(0)}% | ${pnl.toFixed(2)}`);
+
+updateStats();
+}
+
+// ===== STATS =====
+function updateStats(){
+
+let totalW=0,totalL=0;
+let bestTier="--",bestWR=0;
+
+Object.keys(tiers).forEach(t=>{
+let d=tiers[t];
+let tot=d.w+d.l;
+let wr=tot?d.w/tot*100:0;
+
+document.getElementById("wr"+t).innerText=wr.toFixed(1)+"%";
+
+if(wr>bestWR){ bestWR=wr; bestTier=t; }
+
+totalW+=d.w; totalL+=d.l;
+});
+
+let total=totalW+totalL;
+let wr=total?totalW/total*100:0;
+
+document.getElementById("winrate").innerText=wr.toFixed(1)+"%";
+document.getElementById("balance").innerText=balance.toFixed(2);
+document.getElementById("bestTier").innerText=bestTier+"%";
+
+// best session
+let bs="--",bsWR=0;
+Object.keys(sessionStats).forEach(s=>{
+let d=sessionStats[s];
+let tot=d.w+d.l;
+let wr=tot?d.w/tot*100:0;
+if(wr>bsWR){bsWR=wr;bs=s;}
+});
+document.getElementById("bestSession").innerText=bs+" ("+bsWR.toFixed(1)+"%)";
+
+// best hour
+let bh="--",bhWR=0;
+Object.keys(hourlyStats).forEach(h=>{
+let d=hourlyStats[h];
+let tot=d.w+d.l;
+let wr=tot?d.w/tot*100:0;
+if(wr>bhWR){bhWR=wr;bh=h;}
+});
+document.getElementById("bestTime").innerText=bh+":00 ("+bhWR.toFixed(1)+"%)";
+
+// trades
+document.getElementById("trades").innerHTML=trades.slice(0,50).join("<br>");
+}
+
+// ===== TOGGLES =====
+function toggleAuto(){ autoMode=!autoMode; }
+function toggleSession(){ sessionFilter=!sessionFilter; }
+
+// ===== LIVE FEEDS =====
+new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@trade")
+.onmessage=m=>{
+tradePrice=parseFloat(JSON.parse(m.data).p);
+updatePrice();
+};
+
+new WebSocket("wss://fstream.binance.com/ws/btcusdt@markPrice")
+.onmessage=m=>{
+markPrice=parseFloat(JSON.parse(m.data).p);
+updatePrice();
+};
 
 </script>
 
