@@ -6,12 +6,19 @@
 
 <script>
 
-let ws = new WebSocket("wss://https://btc-server-3eh2.onrender.com");
+const API = "https://https://btc-server-3eh2.onrender.com"; // CHANGE THIS
 
-ws.onmessage = e=>{
-  let d = JSON.parse(e.data);
-  price.innerText = "$"+d.price;
-};
+async function getPrice(){
+  try{
+    let res = await fetch(API);
+    let data = await res.json();
+    document.getElementById("price").innerText = "$" + data.price;
+  } catch(e){
+    document.getElementById("price").innerText = "Connecting...";
+  }
+}
+
+setInterval(getPrice, 1000);
 
 </script>
 
