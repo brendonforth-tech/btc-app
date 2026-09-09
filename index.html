@@ -1,24 +1,177 @@
 <!DOCTYPE html>
 <html>
-<body style="background:black;color:lime;text-align:center;font-family:monospace;">
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<style>
+body {
+  margin:0;
+  background:black;
+  color:#00ff99;
+  font-family:monospace;
+}
+#top {
+  padding:10px;
+  display:flex;
+  justify-content:space-between;
+}
+#price {
+  font-size:28px;
+}
+button {
+  background:#111;
+  color:#0f0;
+  border:1px solid #0f0;
+  padding:5px;
+}
+canvas {
+  width:100%;
+  height:300px;
+  background:#000;
+}
+#signals {
+  padding:10px;
+}
+</style>
+</head>
 
-<h1 id="price">Loading...</h1>
+<body>
+
+<div id="top">
+  <div id="price">Loading...</div>
+  <div>
+    <button onclick="toggleMode()">Mode: Direct</button>
+  </div>
+</div>
+
+<canvas id="chart"></canvas>
+
+<div id="signals">
+  Signal: <span id="signal">WAIT</span><br>
+  Winrate: <span id="winrate">0%</span>
+</div>
 
 <script>
 
-const API = "https://https://btc-server-3eh2.onrender.com"; // CHANGE THIS
+// ===== SETTINGS =====
+let mode = "direct"; // direct or server
+let serverURL = "https://https://btc-server-3eh2.onrender.com"; // YOUR SERVER
 
-async function getPrice(){
-  try{
-    let res = await fetch(API);
-    let data = await res.json();
-    document.getElementById("price").innerText = "$" + data.price;
-  } catch(e){
-    document.getElementById("price").innerText = "Connecting...";
-  }
+// ===== DATA =====
+let price = 0;
+let prices = [];
+let trades = [];
+let wins = 0;
+let losses = 0;
+
+// ===== CHART =====
+const canvas = document.getElementById("chart");
+const ctx = canvas.getContext("2d");
+
+function drawChart(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  if(prices.length < 2) return;
+
+  let max = Math.max(...prices);
+  let min = Math.min(...prices);
+
+  ctx.beginPath();
+  prices.forEach((p,i)=>{
+    let x = (i/prices.length)*canvas.width;
+    let y = canvas.height - ((p-min)/(max-min))*canvas.height;
+    if(i===0) ctx.moveTo(x,y);
+    else ctx.lineTo(x,y);
+  });
+
+  ctx.strokeStyle="#00ff99";
+  ctx.stroke();
 }
 
-setInterval(getPrice, 1000);
+// ===== SIGNAL LOGIC =====
+function checkSignal(){
+  if(prices.length < 20) return;
+
+  let last = prices[prices.length-1];
+  let prev = prices[prices.length-10];
+
+  if(last > prev){
+    document.getElementById("signal").innerText = "BUY";
+    trades.push({type:"buy",price:last});
+  } else if(last < prev){
+    document.getElementById("signal").innerText = "SELL";
+    trades.push({type:"sell",price:last});
+  } else {
+    document.getElementById("signal").innerText = "WAIT";
+  }
+
+  updateWinrate();
+}
+
+// ===== WINRATE =====
+function updateWinrate(){
+  if(trades.length < 2) return;
+
+  let last = trades[trades.length-1];
+  let prev = trades[trades.length-2];
+
+  if(last.type === "sell" && prev.type === "buy"){
+    if(last.price > prev.price) wins++;
+    else losses++;
+  }
+
+  let total = wins + losses;
+  let rate = total ? ((wins/total)*100).toFixed(1) : 0;
+
+  document.getElementById("winrate").innerText = rate + "%";
+}
+
+// ===== MODE TOGGLE =====
+function toggleMode(){
+  mode = mode === "direct" ? "server" : "direct";
+  alert("Mode: " + mode);
+}
+
+// ===== DIRECT MODE (FASTEST) =====
+let ws;
+
+function startDirect(){
+  ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@trade");
+
+  ws.onmessage = (msg)=>{
+    let data = JSON.parse(msg.data);
+    price = parseFloat(data.p);
+
+    update(price);
+  };
+}
+
+// ===== SERVER MODE =====
+async function startServer(){
+  setInterval(async ()=>{
+    let res = await fetch(serverURL);
+    let data = await res.json();
+    price = data.price;
+    update(price);
+  },1000);
+}
+
+// ===== UPDATE LOOP =====
+function update(p){
+  prices.push(p);
+  if(prices.length > 200) prices.shift();
+
+  document.getElementById("price").innerText = "$" + p.toFixed(2);
+
+  drawChart();
+  checkSignal();
+}
+
+// ===== START =====
+if(mode === "direct"){
+  startDirect();
+} else {
+  startServer();
+}
 
 </script>
 
