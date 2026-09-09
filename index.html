@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<body style="background:black;color:lime;text-align:center;font-family:monospace;">
+
+<h1 id="price">Loading...</h1>
+
+<script>
+
+let ws = new WebSocket("wss://https://btc-server-3eh2.onrender.com");
+
+ws.onmessage = e=>{
+  let d = JSON.parse(e.data);
+  price.innerText = "$"+d.price;
+};
+
+</script>
+
+</body>
+</html>
