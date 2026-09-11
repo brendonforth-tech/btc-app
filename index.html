@@ -4,8 +4,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <style>
 body { margin:0; background:black; color:#00ff99; font-family:monospace; }
-#top { display:flex; justify-content:space-between; padding:10px; }
-#price { font-size:30px; }
+#top { padding:10px; }
+#price { font-size:32px; }
 #chart { width:100%; height:260px; }
 #panel { padding:10px; }
 #trades { max-height:150px; overflow:auto; border-top:1px solid #0f0; }
@@ -119,6 +119,29 @@ function confidence(move,vol){
 return Math.min(100,(Math.abs(move)*12000)+(vol*400));
 }
 
+// ===== PRO SIGNAL LOGIC =====
+function detectTrap(){
+let a=prices.at(-1);
+let b=prices.at(-5);
+let c=prices.at(-10);
+
+let fastMove=Math.abs(a-b);
+let slowMove=Math.abs(b-c);
+
+return fastMove > slowMove * 2;
+}
+
+function detectFakeBreakout(){
+let high=Math.max(...prices.slice(-10));
+let low=Math.min(...prices.slice(-10));
+let last=prices.at(-1);
+
+if(last>high && prices.at(-2)<high) return "SELL";
+if(last<low && prices.at(-2)>low) return "BUY";
+
+return null;
+}
+
 // ===== SIGNAL =====
 function checkSignal(){
 
@@ -131,13 +154,27 @@ let move=(last-prev)/prev;
 let vol=Math.abs(prices.at(-1)-prices.at(-2));
 
 let conf=confidence(move,vol);
-document.getElementById("conf").innerText=conf.toFixed(0)+"%";
+
+let trap=detectTrap();
+let fake=detectFakeBreakout();
 
 let signal="WAIT";
+
+if(fake){
+signal=fake;
+conf+=15;
+}
+else if(trap){
+signal = move>0 ? "SELL" : "BUY";
+conf+=10;
+}
+else{
 if(move>0.0008) signal="BUY";
 if(move<-0.0008) signal="SELL";
+}
 
 document.getElementById("signal").innerText=signal;
+document.getElementById("conf").innerText=conf.toFixed(0)+"%";
 
 // BEST TIER FILTER
 let tier=Math.floor(conf/5)*5;
@@ -174,13 +211,11 @@ if(type==="SELL") pnl*=-1;
 
 balance+=pnl;
 
-// tier
 let t=Math.floor(conf/5)*5;
 if(tiers[t]){
 if(pnl>0) tiers[t].w++; else tiers[t].l++;
 }
 
-// hour
 let h=new Date().getHours();
 if(!hours[h]) hours[h]={w:0,l:0};
 if(pnl>0) hours[h].w++; else hours[h].l++;
@@ -211,7 +246,6 @@ document.getElementById("wr").innerText=tot?(w/tot*100).toFixed(1)+"%":"0%";
 document.getElementById("bal").innerText=balance.toFixed(2);
 document.getElementById("bestTier").innerText=bestT+"%";
 
-// best hour
 let bh="--",bwr=0;
 Object.keys(hours).forEach(h=>{
 let d=hours[h];
@@ -219,8 +253,8 @@ let tot=d.w+d.l;
 let wr=tot?d.w/tot*100:0;
 if(wr>bwr){bwr=wr;bh=h;}
 });
-document.getElementById("bestTime").innerText=bh+":00";
 
+document.getElementById("bestTime").innerText=bh+":00";
 document.getElementById("trades").innerHTML=trades.slice(0,50).join("<br>");
 }
 
