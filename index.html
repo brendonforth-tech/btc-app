@@ -3,11 +3,11 @@
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <style>
-body { background:black; color:#00ff99; font-family:monospace; margin:0; }
+body { margin:0; background:black; color:#00ff99; font-family:monospace; }
 #top { display:flex; justify-content:space-between; padding:10px; }
 #price { font-size:28px; }
-button { padding:6px 10px; margin-left:5px; }
-#chart { width:100%; height:260px; background:black; }
+button { margin-left:5px; }
+#chart { width:100%; height:260px; }
 #panel { padding:10px; }
 #trades { max-height:160px; overflow:auto; border-top:1px solid #0f0; }
 </style>
@@ -16,11 +16,11 @@ button { padding:6px 10px; margin-left:5px; }
 <body>
 
 <div id="top">
-<div id="price">Connecting...</div>
-<div>
-<button onclick="auto=!auto">Auto</button>
-<button onclick="sessionFilter=!sessionFilter">Session</button>
-</div>
+  <div id="price">Connecting...</div>
+  <div>
+    <button onclick="auto=!auto">Auto</button>
+    <button onclick="sessionFilter=!sessionFilter">Session</button>
+  </div>
 </div>
 
 <canvas id="chart"></canvas>
@@ -51,8 +51,14 @@ let auto = true;
 let sessionFilter = true;
 let balance = 1000;
 
-// ===== DATA =====
+// TP / SL
+let TP = 0.002;
+let SL = 0.001;
+
+// ===== PRICE DATA =====
 let price = 0;
+let aggPrice = 0;
+let tickerPrice = 0;
 let prices = [];
 let trades = [];
 
@@ -60,7 +66,7 @@ let trades = [];
 let tiers = {80:{w:0,l:0},85:{w:0,l:0},90:{w:0,l:0},95:{w:0,l:0},100:{w:0,l:0}};
 let hours = {};
 
-// ===== SESSION =====
+// ===== SESSION FILTER =====
 function goodSession(){
 if(!sessionFilter) return true;
 let h=new Date().getHours();
@@ -72,7 +78,6 @@ const ctx = document.getElementById("chart").getContext("2d");
 
 function draw(){
 ctx.clearRect(0,0,window.innerWidth,260);
-
 if(prices.length<5) return;
 
 let max=Math.max(...prices);
@@ -91,7 +96,30 @@ ctx.stroke();
 }
 }
 
-// ===== CONFIDENCE (trench-like momentum) =====
+// ===== FEEDS =====
+const ws1 = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@aggTrade");
+ws1.onmessage = e=>{
+let d=JSON.parse(e.data);
+let p=parseFloat(d.p);
+if(!isNaN(p)) aggPrice=p;
+};
+
+const ws2 = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@ticker");
+ws2.onmessage = e=>{
+let d=JSON.parse(e.data);
+let p=parseFloat(d.c);
+if(!isNaN(p)) tickerPrice=p;
+};
+
+// ===== PRICE ENGINE =====
+function getPrice(){
+if(!aggPrice && !tickerPrice) return;
+let blended=(aggPrice*0.65)+(tickerPrice*0.35);
+price += (blended - price) * 0.4;
+return price;
+}
+
+// ===== CONFIDENCE =====
 function confidence(move,vol){
 return Math.min(100,(Math.abs(move)*12000)+(vol*400));
 }
@@ -103,6 +131,7 @@ if(prices.length<30 || !goodSession()) return;
 
 let last=prices.at(-1);
 let prev=prices.at(-10);
+
 let move=(last-prev)/prev;
 let vol=Math.abs(prices.at(-1)-prices.at(-2));
 
@@ -115,34 +144,36 @@ if(move<-0.0008) signal="SELL";
 
 document.getElementById("signal").innerText=signal;
 
-// BEST TIER ONLY
+// BEST TIER FILTER
 let tier=Math.floor(conf/5)*5;
 let best=document.getElementById("bestTier").innerText.replace("%","");
 
 if(best!=="--" && tier!=best) return;
 
-if(signal!="WAIT") trade(signal,last,conf);
+if(signal!=="WAIT"){
+startTrade(signal,last,conf);
+}
 }
 
 // ===== TRADE =====
-function trade(type,entry,conf){
+function startTrade(type,entry,conf){
 
-let tp=0.002;
-let sl=0.001;
+let interval=setInterval(()=>{
 
-let timer=setInterval(()=>{
 let move=(price-entry)/entry;
 if(type==="SELL") move*=-1;
 
-if(move>=tp || move<=-sl){
-clearInterval(timer);
-finish(type,entry,price,conf);
+// TP / SL
+if(move>=TP || move<=-SL){
+clearInterval(interval);
+finishTrade(type,entry,price,conf);
 }
+
 },200);
 }
 
 // ===== FINISH =====
-function finish(type,entry,exit,conf){
+function finishTrade(type,entry,exit,conf){
 
 let pnl=((exit-entry)/entry)*1000;
 if(type==="SELL") pnl*=-1;
@@ -199,17 +230,16 @@ document.getElementById("bestTime").innerText=bh+":00";
 document.getElementById("trades").innerHTML=trades.slice(0,50).join("<br>");
 }
 
-// ===== BINANCE DIRECT (NO BUGS) =====
-const ws = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@trade");
+// ===== MAIN LOOP =====
+setInterval(()=>{
 
-ws.onmessage = (e)=>{
-let data=JSON.parse(e.data);
-let p=parseFloat(data.p);
+let p=getPrice();
+if(!p) return;
 
-// SAFETY FILTER (prevents 50k bug)
 if(p<10000||p>200000) return;
 
 price=p;
+
 prices.push(price);
 if(prices.length>200) prices.shift();
 
@@ -217,9 +247,8 @@ document.getElementById("price").innerText="$"+price.toFixed(2);
 
 draw();
 checkSignal();
-};
 
-ws.onclose=()=>setTimeout(()=>location.reload(),2000);
+},50);
 
 </script>
 
