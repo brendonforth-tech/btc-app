@@ -5,11 +5,10 @@
 <style>
 body { margin:0; background:black; color:#00ff99; font-family:monospace; }
 #top { display:flex; justify-content:space-between; padding:10px; }
-#price { font-size:28px; }
-button { margin-left:5px; }
+#price { font-size:30px; }
 #chart { width:100%; height:260px; }
 #panel { padding:10px; }
-#trades { max-height:160px; overflow:auto; border-top:1px solid #0f0; }
+#trades { max-height:150px; overflow:auto; border-top:1px solid #0f0; }
 </style>
 </head>
 
@@ -17,10 +16,6 @@ button { margin-left:5px; }
 
 <div id="top">
   <div id="price">Connecting...</div>
-  <div>
-    <button onclick="auto=!auto">Auto</button>
-    <button onclick="sessionFilter=!sessionFilter">Session</button>
-  </div>
 </div>
 
 <canvas id="chart"></canvas>
@@ -47,31 +42,20 @@ Best Time: <span id="bestTime">--</span>
 <script>
 
 // ===== SETTINGS =====
-let auto = true;
-let sessionFilter = true;
 let balance = 1000;
-
-// TP / SL
 let TP = 0.002;
 let SL = 0.001;
 
-// ===== PRICE DATA =====
+// ===== PRICE CORE (DO NOT TOUCH) =====
 let price = 0;
-let aggPrice = 0;
 let tickerPrice = 0;
+let aggMove = 0;
 let prices = [];
-let trades = [];
 
-// ===== STATS =====
+// ===== DATA =====
+let trades = [];
 let tiers = {80:{w:0,l:0},85:{w:0,l:0},90:{w:0,l:0},95:{w:0,l:0},100:{w:0,l:0}};
 let hours = {};
-
-// ===== SESSION FILTER =====
-function goodSession(){
-if(!sessionFilter) return true;
-let h=new Date().getHours();
-return (h>=8&&h<=11)||(h>=2&&h<=5);
-}
 
 // ===== CHART =====
 const ctx = document.getElementById("chart").getContext("2d");
@@ -97,26 +81,37 @@ ctx.stroke();
 }
 
 // ===== FEEDS =====
-const ws1 = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@aggTrade");
-ws1.onmessage = e=>{
-let d=JSON.parse(e.data);
-let p=parseFloat(d.p);
-if(!isNaN(p)) aggPrice=p;
-};
-
-const ws2 = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@ticker");
-ws2.onmessage = e=>{
+const wsTicker = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@ticker");
+wsTicker.onmessage = e=>{
 let d=JSON.parse(e.data);
 let p=parseFloat(d.c);
 if(!isNaN(p)) tickerPrice=p;
 };
 
+const wsAgg = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@aggTrade");
+wsAgg.onmessage = e=>{
+let d=JSON.parse(e.data);
+let p=parseFloat(d.p);
+if(!isNaN(p)) aggMove = p - tickerPrice;
+};
+
 // ===== PRICE ENGINE =====
-function getPrice(){
-if(!aggPrice && !tickerPrice) return;
-let blended=(aggPrice*0.65)+(tickerPrice*0.35);
-price += (blended - price) * 0.4;
-return price;
+function updatePrice(){
+
+if(!tickerPrice) return;
+
+let target = tickerPrice + (aggMove * 0.2);
+price += (target - price) * 0.3;
+
+if(price < 10000 || price > 200000) return;
+
+prices.push(price);
+if(prices.length > 200) prices.shift();
+
+document.getElementById("price").innerText="$"+price.toFixed(2);
+
+draw();
+checkSignal();
 }
 
 // ===== CONFIDENCE =====
@@ -127,7 +122,7 @@ return Math.min(100,(Math.abs(move)*12000)+(vol*400));
 // ===== SIGNAL =====
 function checkSignal(){
 
-if(prices.length<30 || !goodSession()) return;
+if(prices.length < 30) return;
 
 let last=prices.at(-1);
 let prev=prices.at(-10);
@@ -163,7 +158,6 @@ let interval=setInterval(()=>{
 let move=(price-entry)/entry;
 if(type==="SELL") move*=-1;
 
-// TP / SL
 if(move>=TP || move<=-SL){
 clearInterval(interval);
 finishTrade(type,entry,price,conf);
@@ -230,25 +224,8 @@ document.getElementById("bestTime").innerText=bh+":00";
 document.getElementById("trades").innerHTML=trades.slice(0,50).join("<br>");
 }
 
-// ===== MAIN LOOP =====
-setInterval(()=>{
-
-let p=getPrice();
-if(!p) return;
-
-if(p<10000||p>200000) return;
-
-price=p;
-
-prices.push(price);
-if(prices.length>200) prices.shift();
-
-document.getElementById("price").innerText="$"+price.toFixed(2);
-
-draw();
-checkSignal();
-
-},50);
+// ===== LOOP =====
+setInterval(updatePrice,50);
 
 </script>
 
