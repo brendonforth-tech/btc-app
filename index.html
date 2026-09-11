@@ -46,13 +46,14 @@ let balance = 1000;
 let TP = 0.002;
 let SL = 0.001;
 
-// ===== PRICE CORE (DO NOT TOUCH) =====
+// ===== PRICE DATA =====
 let price = 0;
 let tickerPrice = 0;
 let aggMove = 0;
+let coinbasePrice = 0;
 let prices = [];
 
-// ===== DATA =====
+// ===== STATS =====
 let trades = [];
 let tiers = {80:{w:0,l:0},85:{w:0,l:0},90:{w:0,l:0},95:{w:0,l:0},100:{w:0,l:0}};
 let hours = {};
@@ -80,7 +81,7 @@ ctx.stroke();
 }
 }
 
-// ===== FEEDS =====
+// ===== BINANCE =====
 const wsTicker = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@ticker");
 wsTicker.onmessage = e=>{
 let d=JSON.parse(e.data);
@@ -95,13 +96,38 @@ let p=parseFloat(d.p);
 if(!isNaN(p)) aggMove = p - tickerPrice;
 };
 
-// ===== PRICE ENGINE =====
+// ===== COINBASE (KEY FIX) =====
+const wsCB = new WebSocket("wss://ws-feed.exchange.coinbase.com");
+
+wsCB.onopen = ()=>{
+wsCB.send(JSON.stringify({
+type:"subscribe",
+product_ids:["BTC-USD"],
+channels:["ticker"]
+}));
+};
+
+wsCB.onmessage = e=>{
+let d=JSON.parse(e.data);
+if(d.type==="ticker"){
+let p=parseFloat(d.price);
+if(!isNaN(p)) coinbasePrice=p;
+}
+};
+
+// ===== PRICE ENGINE (FINAL) =====
 function updatePrice(){
 
-if(!tickerPrice) return;
+if(!coinbasePrice && !tickerPrice) return;
 
-let target = tickerPrice + (aggMove * 0.2);
-price += (target - price) * 0.3;
+// anchor to coinbase (THIS fixes $30 issue)
+let base = coinbasePrice || tickerPrice;
+
+// micro movement boost
+let target = base + (aggMove * 0.12);
+
+// ultra light smoothing
+price += (target - price) * 0.22;
 
 if(price < 10000 || price > 200000) return;
 
@@ -114,21 +140,23 @@ draw();
 checkSignal();
 }
 
-// ===== CONFIDENCE =====
-function confidence(move,vol){
-return Math.min(100,(Math.abs(move)*12000)+(vol*400));
+// ===== SIGNAL LOGIC =====
+function confidence(move,vol,acc){
+return Math.min(100,(Math.abs(move)*12000)+(vol*300)+(acc*800));
 }
 
-// ===== PRO SIGNAL LOGIC =====
+function detectAcceleration(){
+let a=prices.at(-1);
+let b=prices.at(-3);
+let c=prices.at(-6);
+return Math.abs((a-b)-(b-c));
+}
+
 function detectTrap(){
 let a=prices.at(-1);
 let b=prices.at(-5);
 let c=prices.at(-10);
-
-let fastMove=Math.abs(a-b);
-let slowMove=Math.abs(b-c);
-
-return fastMove > slowMove * 2;
+return Math.abs(a-b) > Math.abs(b-c)*2;
 }
 
 function detectFakeBreakout(){
@@ -138,45 +166,45 @@ let last=prices.at(-1);
 
 if(last>high && prices.at(-2)<high) return "SELL";
 if(last<low && prices.at(-2)>low) return "BUY";
-
 return null;
 }
 
 // ===== SIGNAL =====
 function checkSignal(){
 
-if(prices.length < 30) return;
+if(prices.length<30) return;
 
 let last=prices.at(-1);
 let prev=prices.at(-10);
 
 let move=(last-prev)/prev;
 let vol=Math.abs(prices.at(-1)-prices.at(-2));
+let acc=detectAcceleration();
 
-let conf=confidence(move,vol);
-
-let trap=detectTrap();
-let fake=detectFakeBreakout();
+let conf=confidence(move,vol,acc);
 
 let signal="WAIT";
 
+let fake=detectFakeBreakout();
+let trap=detectTrap();
+
 if(fake){
 signal=fake;
-conf+=15;
+conf+=20;
 }
 else if(trap){
-signal = move>0 ? "SELL" : "BUY";
-conf+=10;
+signal = move>0?"SELL":"BUY";
+conf+=15;
 }
 else{
-if(move>0.0008) signal="BUY";
-if(move<-0.0008) signal="SELL";
+if(acc>5 && move>0.0003) signal="BUY";
+if(acc>5 && move<-0.0003) signal="SELL";
 }
 
 document.getElementById("signal").innerText=signal;
 document.getElementById("conf").innerText=conf.toFixed(0)+"%";
 
-// BEST TIER FILTER
+// best tier filter
 let tier=Math.floor(conf/5)*5;
 let best=document.getElementById("bestTier").innerText.replace("%","");
 
@@ -200,7 +228,7 @@ clearInterval(interval);
 finishTrade(type,entry,price,conf);
 }
 
-},200);
+},150);
 }
 
 // ===== FINISH =====
