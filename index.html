@@ -6,9 +6,29 @@
 body { margin:0; background:black; color:#00ff99; font-family:monospace; }
 #top { padding:10px; }
 #price { font-size:32px; }
+
 #chart { width:100%; height:260px; }
+
 #panel { padding:10px; }
-#trades { max-height:150px; overflow:auto; border-top:1px solid #0f0; }
+
+table {
+  width:100%;
+  border-collapse:collapse;
+  margin-top:10px;
+}
+
+td, th {
+  border:1px solid #0f0;
+  padding:5px;
+  text-align:center;
+  font-size:12px;
+}
+
+#openTrade {
+  border:1px solid #0f0;
+  padding:10px;
+  margin:10px;
+}
 </style>
 </head>
 
@@ -21,23 +41,34 @@ body { margin:0; background:black; color:#00ff99; font-family:monospace; }
 <canvas id="chart"></canvas>
 
 <div id="panel">
-Signal: <span id="signal">WAIT</span><br>
-Confidence: <span id="conf">0%</span><br>
-Winrate: <span id="wr">0%</span><br>
-Balance: $<span id="bal">1000</span><br>
-Best Tier: <span id="bestTier">--</span><br>
-Best Time: <span id="bestTime">--</span>
+Signal: <span id="signal">WAIT</span> |
+Confidence: <span id="conf">0%</span> |
+Winrate: <span id="wr">0%</span> |
+Balance: $<span id="bal">1000</span>
 </div>
 
-<div id="panel">
-80: <span id="t80">0%</span> |
-85: <span id="t85">0%</span> |
-90: <span id="t90">0%</span> |
-95: <span id="t95">0%</span> |
-100: <span id="t100">0%</span>
+<!-- OPEN TRADE -->
+<div id="openTrade">
+<b>Open Position</b><br>
+Type: <span id="oType">NONE</span><br>
+Entry: <span id="oEntry">-</span><br>
+PnL: <span id="oPnl">-</span><br>
+Time: <span id="oTime">0s</span>
 </div>
 
-<div id="trades"></div>
+<!-- TRADE TABLE -->
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Entry</th>
+<th>Exit</th>
+<th>PnL</th>
+<th>Conf</th>
+</tr>
+</thead>
+<tbody id="tradeTable"></tbody>
+</table>
 
 <script>
 
@@ -46,17 +77,18 @@ let balance = 1000;
 let TP = 0.002;
 let SL = 0.001;
 
-// ===== PRICE DATA =====
+// ===== TRADE CONTROL =====
+let activeTrade = null;
+
+// ===== PRICE =====
 let price = 0;
 let tickerPrice = 0;
 let aggMove = 0;
 let coinbasePrice = 0;
 let prices = [];
 
-// ===== STATS =====
+// ===== DATA =====
 let trades = [];
-let tiers = {80:{w:0,l:0},85:{w:0,l:0},90:{w:0,l:0},95:{w:0,l:0},100:{w:0,l:0}};
-let hours = {};
 
 // ===== CHART =====
 const ctx = document.getElementById("chart").getContext("2d");
@@ -81,209 +113,170 @@ ctx.stroke();
 }
 }
 
-// ===== BINANCE =====
-const wsTicker = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@ticker");
-wsTicker.onmessage = e=>{
+// ===== FEEDS =====
+new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@ticker")
+.onmessage = e=>{
 let d=JSON.parse(e.data);
-let p=parseFloat(d.c);
-if(!isNaN(p)) tickerPrice=p;
+tickerPrice=parseFloat(d.c)||tickerPrice;
 };
 
-const wsAgg = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@aggTrade");
-wsAgg.onmessage = e=>{
+new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@aggTrade")
+.onmessage = e=>{
 let d=JSON.parse(e.data);
 let p=parseFloat(d.p);
-if(!isNaN(p)) aggMove = p - tickerPrice;
+if(!isNaN(p)) aggMove=p-tickerPrice;
 };
 
-// ===== COINBASE (KEY FIX) =====
-const wsCB = new WebSocket("wss://ws-feed.exchange.coinbase.com");
-
-wsCB.onopen = ()=>{
-wsCB.send(JSON.stringify({
+const wsCB=new WebSocket("wss://ws-feed.exchange.coinbase.com");
+wsCB.onopen=()=>wsCB.send(JSON.stringify({
 type:"subscribe",
 product_ids:["BTC-USD"],
 channels:["ticker"]
 }));
-};
-
-wsCB.onmessage = e=>{
+wsCB.onmessage=e=>{
 let d=JSON.parse(e.data);
-if(d.type==="ticker"){
-let p=parseFloat(d.price);
-if(!isNaN(p)) coinbasePrice=p;
-}
+if(d.type==="ticker") coinbasePrice=parseFloat(d.price)||coinbasePrice;
 };
 
-// ===== PRICE ENGINE (FINAL) =====
+// ===== PRICE ENGINE (SMOOTH + ACCURATE) =====
 function updatePrice(){
 
 if(!coinbasePrice && !tickerPrice) return;
 
-// anchor to coinbase (THIS fixes $30 issue)
-let base = coinbasePrice || tickerPrice;
+let base=coinbasePrice||tickerPrice;
 
-// micro movement boost
-let target = base + (aggMove * 0.12);
-
-// ultra light smoothing
-price += (target - price) * 0.22;
-
-if(price < 10000 || price > 200000) return;
+// smoother + less jumpy
+let target=base+(aggMove*0.08);
+price+=(target-price)*0.18;
 
 prices.push(price);
-if(prices.length > 200) prices.shift();
+if(prices.length>200) prices.shift();
 
 document.getElementById("price").innerText="$"+price.toFixed(2);
 
 draw();
+updateOpenTrade();
 checkSignal();
-}
-
-// ===== SIGNAL LOGIC =====
-function confidence(move,vol,acc){
-return Math.min(100,(Math.abs(move)*12000)+(vol*300)+(acc*800));
-}
-
-function detectAcceleration(){
-let a=prices.at(-1);
-let b=prices.at(-3);
-let c=prices.at(-6);
-return Math.abs((a-b)-(b-c));
-}
-
-function detectTrap(){
-let a=prices.at(-1);
-let b=prices.at(-5);
-let c=prices.at(-10);
-return Math.abs(a-b) > Math.abs(b-c)*2;
-}
-
-function detectFakeBreakout(){
-let high=Math.max(...prices.slice(-10));
-let low=Math.min(...prices.slice(-10));
-let last=prices.at(-1);
-
-if(last>high && prices.at(-2)<high) return "SELL";
-if(last<low && prices.at(-2)>low) return "BUY";
-return null;
 }
 
 // ===== SIGNAL =====
 function checkSignal(){
 
-if(prices.length<30) return;
+if(prices.length<30 || activeTrade) return;
 
 let last=prices.at(-1);
 let prev=prices.at(-10);
 
 let move=(last-prev)/prev;
 let vol=Math.abs(prices.at(-1)-prices.at(-2));
-let acc=detectAcceleration();
 
-let conf=confidence(move,vol,acc);
+let conf=Math.min(100,(Math.abs(move)*12000)+(vol*300));
 
 let signal="WAIT";
-
-let fake=detectFakeBreakout();
-let trap=detectTrap();
-
-if(fake){
-signal=fake;
-conf+=20;
-}
-else if(trap){
-signal = move>0?"SELL":"BUY";
-conf+=15;
-}
-else{
-if(acc>5 && move>0.0003) signal="BUY";
-if(acc>5 && move<-0.0003) signal="SELL";
-}
+if(move>0.0007) signal="BUY";
+if(move<-0.0007) signal="SELL";
 
 document.getElementById("signal").innerText=signal;
 document.getElementById("conf").innerText=conf.toFixed(0)+"%";
 
-// best tier filter
-let tier=Math.floor(conf/5)*5;
-let best=document.getElementById("bestTier").innerText.replace("%","");
+if(signal==="WAIT") return;
 
-if(best!=="--" && tier!=best) return;
-
-if(signal!=="WAIT"){
+// delay entry (1 sec)
+setTimeout(()=>{
+if(!activeTrade){
 startTrade(signal,last,conf);
 }
+},1000);
 }
 
-// ===== TRADE =====
+// ===== START TRADE =====
 function startTrade(type,entry,conf){
 
-let interval=setInterval(()=>{
+activeTrade={
+type,
+entry,
+conf,
+start:Date.now()
+};
 
-let move=(price-entry)/entry;
-if(type==="SELL") move*=-1;
-
-if(move>=TP || move<=-SL){
-clearInterval(interval);
-finishTrade(type,entry,price,conf);
 }
 
-},150);
+// ===== UPDATE OPEN TRADE =====
+function updateOpenTrade(){
+
+if(!activeTrade) return;
+
+let t=(Date.now()-activeTrade.start)/1000;
+let move=(price-activeTrade.entry)/activeTrade.entry;
+if(activeTrade.type==="SELL") move*=-1;
+
+let pnl=(move*1000);
+
+document.getElementById("oType").innerText=activeTrade.type;
+document.getElementById("oEntry").innerText=activeTrade.entry.toFixed(2);
+document.getElementById("oPnl").innerText=pnl.toFixed(2);
+document.getElementById("oTime").innerText=t.toFixed(1)+"s";
+
+// enforce 10 sec hold
+if(t<10) return;
+
+// TP / SL
+if(move>=TP || move<=-SL){
+finishTrade(price);
+}
 }
 
 // ===== FINISH =====
-function finishTrade(type,entry,exit,conf){
+function finishTrade(exit){
 
-let pnl=((exit-entry)/entry)*1000;
-if(type==="SELL") pnl*=-1;
+let move=(exit-activeTrade.entry)/activeTrade.entry;
+if(activeTrade.type==="SELL") move*=-1;
 
+let pnl=move*1000;
 balance+=pnl;
 
-let t=Math.floor(conf/5)*5;
-if(tiers[t]){
-if(pnl>0) tiers[t].w++; else tiers[t].l++;
+trades.unshift({
+type:activeTrade.type,
+entry:activeTrade.entry,
+exit,
+pnl,
+conf:activeTrade.conf
+});
+
+activeTrade=null;
+
+updateTable();
+updateStats();
 }
 
-let h=new Date().getHours();
-if(!hours[h]) hours[h]={w:0,l:0};
-if(pnl>0) hours[h].w++; else hours[h].l++;
+// ===== TABLE =====
+function updateTable(){
 
-trades.unshift(`${type} | ${conf.toFixed(0)}% | ${pnl.toFixed(2)}`);
+let html="";
+trades.slice(0,20).forEach(t=>{
+html+=`
+<tr>
+<td>${t.type}</td>
+<td>${t.entry.toFixed(2)}</td>
+<td>${t.exit.toFixed(2)}</td>
+<td>${t.pnl.toFixed(2)}</td>
+<td>${t.conf.toFixed(0)}%</td>
+</tr>`;
+});
 
-updateStats();
+document.getElementById("tradeTable").innerHTML=html;
 }
 
 // ===== STATS =====
 function updateStats(){
 
-let w=0,l=0,bestT="--",bestWR=0;
+let wins=trades.filter(t=>t.pnl>0).length;
+let total=trades.length;
 
-Object.keys(tiers).forEach(t=>{
-let d=tiers[t];
-let tot=d.w+d.l;
-let wr=tot?d.w/tot*100:0;
+document.getElementById("wr").innerText=
+total?(wins/total*100).toFixed(1)+"%":"0%";
 
-document.getElementById("t"+t).innerText=wr.toFixed(0)+"%";
-
-if(wr>bestWR){bestWR=wr;bestT=t;}
-w+=d.w;l+=d.l;
-});
-
-let tot=w+l;
-document.getElementById("wr").innerText=tot?(w/tot*100).toFixed(1)+"%":"0%";
 document.getElementById("bal").innerText=balance.toFixed(2);
-document.getElementById("bestTier").innerText=bestT+"%";
-
-let bh="--",bwr=0;
-Object.keys(hours).forEach(h=>{
-let d=hours[h];
-let tot=d.w+d.l;
-let wr=tot?d.w/tot*100:0;
-if(wr>bwr){bwr=wr;bh=h;}
-});
-
-document.getElementById("bestTime").innerText=bh+":00";
-document.getElementById("trades").innerHTML=trades.slice(0,50).join("<br>");
 }
 
 // ===== LOOP =====
