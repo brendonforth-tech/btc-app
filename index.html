@@ -11,10 +11,15 @@ body { margin:0; background:black; color:#00ff99; font-family:monospace; }
 
 #panel { padding:10px; }
 
+#openTrade {
+  border:1px solid #0f0;
+  margin:10px;
+  padding:10px;
+}
+
 table {
   width:100%;
   border-collapse:collapse;
-  margin-top:10px;
 }
 
 td, th {
@@ -23,19 +28,13 @@ td, th {
   text-align:center;
   font-size:12px;
 }
-
-#openTrade {
-  border:1px solid #0f0;
-  padding:10px;
-  margin:10px;
-}
 </style>
 </head>
 
 <body>
 
 <div id="top">
-  <div id="price">Connecting...</div>
+<div id="price">Connecting...</div>
 </div>
 
 <canvas id="chart"></canvas>
@@ -47,7 +46,6 @@ Winrate: <span id="wr">0%</span> |
 Balance: $<span id="bal">1000</span>
 </div>
 
-<!-- OPEN TRADE -->
 <div id="openTrade">
 <b>Open Position</b><br>
 Type: <span id="oType">NONE</span><br>
@@ -56,15 +54,10 @@ PnL: <span id="oPnl">-</span><br>
 Time: <span id="oTime">0s</span>
 </div>
 
-<!-- TRADE TABLE -->
 <table>
 <thead>
 <tr>
-<th>Type</th>
-<th>Entry</th>
-<th>Exit</th>
-<th>PnL</th>
-<th>Conf</th>
+<th>Type</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Conf</th>
 </tr>
 </thead>
 <tbody id="tradeTable"></tbody>
@@ -77,28 +70,64 @@ let balance = 1000;
 let TP = 0.002;
 let SL = 0.001;
 
-// ===== TRADE CONTROL =====
+// ===== CONTROL =====
 let activeTrade = null;
+let lastSignalTime = 0;
 
 // ===== PRICE =====
-let price = 0;
-let tickerPrice = 0;
-let aggMove = 0;
-let coinbasePrice = 0;
-let prices = [];
+let price=0,ticker=0,agg=0,coinbase=0,prices=[];
 
 // ===== DATA =====
-let trades = [];
+let trades=[];
+
+// ===== FEEDS =====
+new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@ticker")
+.onmessage=e=>ticker=parseFloat(JSON.parse(e.data).c)||ticker;
+
+new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@aggTrade")
+.onmessage=e=>{
+let p=parseFloat(JSON.parse(e.data).p);
+if(!isNaN(p)) agg=p-ticker;
+};
+
+const wsCB=new WebSocket("wss://ws-feed.exchange.coinbase.com");
+wsCB.onopen=()=>wsCB.send(JSON.stringify({
+type:"subscribe",product_ids:["BTC-USD"],channels:["ticker"]
+}));
+wsCB.onmessage=e=>{
+let d=JSON.parse(e.data);
+if(d.type==="ticker") coinbase=parseFloat(d.price)||coinbase;
+};
+
+// ===== PRICE ENGINE (SMOOTH + ACCURATE) =====
+function updatePrice(){
+
+if(!coinbase && !ticker) return;
+
+let base=coinbase||ticker;
+let target=base+(agg*0.06);
+
+// smoother (less jitter)
+price+=(target-price)*0.15;
+
+prices.push(price);
+if(prices.length>200) prices.shift();
+
+document.getElementById("price").innerText="$"+price.toFixed(2);
+
+draw();
+updateOpen();
+checkSignal();
+}
 
 // ===== CHART =====
-const ctx = document.getElementById("chart").getContext("2d");
+const ctx=document.getElementById("chart").getContext("2d");
 
 function draw(){
 ctx.clearRect(0,0,window.innerWidth,260);
 if(prices.length<5) return;
 
-let max=Math.max(...prices);
-let min=Math.min(...prices);
+let max=Math.max(...prices),min=Math.min(...prices);
 
 for(let i=1;i<prices.length;i++){
 let x=i*(window.innerWidth/prices.length);
@@ -113,50 +142,25 @@ ctx.stroke();
 }
 }
 
-// ===== FEEDS =====
-new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@ticker")
-.onmessage = e=>{
-let d=JSON.parse(e.data);
-tickerPrice=parseFloat(d.c)||tickerPrice;
-};
+// ===== SMART FILTERS =====
+function noTradeZone(){
+let move=Math.abs(prices.at(-1)-prices.at(-5));
+return move>50; // too fast = skip
+}
 
-new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@aggTrade")
-.onmessage = e=>{
-let d=JSON.parse(e.data);
-let p=parseFloat(d.p);
-if(!isNaN(p)) aggMove=p-tickerPrice;
-};
+function acceleration(){
+let a=prices.at(-1),b=prices.at(-3),c=prices.at(-6);
+return Math.abs((a-b)-(b-c));
+}
 
-const wsCB=new WebSocket("wss://ws-feed.exchange.coinbase.com");
-wsCB.onopen=()=>wsCB.send(JSON.stringify({
-type:"subscribe",
-product_ids:["BTC-USD"],
-channels:["ticker"]
-}));
-wsCB.onmessage=e=>{
-let d=JSON.parse(e.data);
-if(d.type==="ticker") coinbasePrice=parseFloat(d.price)||coinbasePrice;
-};
+function fakeBreak(){
+let high=Math.max(...prices.slice(-10));
+let low=Math.min(...prices.slice(-10));
+let last=prices.at(-1);
 
-// ===== PRICE ENGINE (SMOOTH + ACCURATE) =====
-function updatePrice(){
-
-if(!coinbasePrice && !tickerPrice) return;
-
-let base=coinbasePrice||tickerPrice;
-
-// smoother + less jumpy
-let target=base+(aggMove*0.08);
-price+=(target-price)*0.18;
-
-prices.push(price);
-if(prices.length>200) prices.shift();
-
-document.getElementById("price").innerText="$"+price.toFixed(2);
-
-draw();
-updateOpenTrade();
-checkSignal();
+if(last>high && prices.at(-2)<high) return true;
+if(last<low && prices.at(-2)>low) return true;
+return false;
 }
 
 // ===== SIGNAL =====
@@ -164,24 +168,37 @@ function checkSignal(){
 
 if(prices.length<30 || activeTrade) return;
 
+// spacing (~5 min)
+if(Date.now()-lastSignalTime < 300000) return;
+
+if(noTradeZone()) return;
+
 let last=prices.at(-1);
 let prev=prices.at(-10);
 
 let move=(last-prev)/prev;
-let vol=Math.abs(prices.at(-1)-prices.at(-2));
+let acc=acceleration();
 
-let conf=Math.min(100,(Math.abs(move)*12000)+(vol*300));
+let conf=(Math.abs(move)*15000)+(acc*900);
+
+// only VERY high confidence
+if(conf<90) return;
+
+// avoid fake moves
+if(fakeBreak()) return;
 
 let signal="WAIT";
-if(move>0.0007) signal="BUY";
-if(move<-0.0007) signal="SELL";
+if(move>0) signal="BUY";
+if(move<0) signal="SELL";
 
 document.getElementById("signal").innerText=signal;
 document.getElementById("conf").innerText=conf.toFixed(0)+"%";
 
 if(signal==="WAIT") return;
 
-// delay entry (1 sec)
+lastSignalTime=Date.now();
+
+// delay entry 1s
 setTimeout(()=>{
 if(!activeTrade){
 startTrade(signal,last,conf);
@@ -189,20 +206,14 @@ startTrade(signal,last,conf);
 },1000);
 }
 
-// ===== START TRADE =====
+// ===== TRADE =====
 function startTrade(type,entry,conf){
 
-activeTrade={
-type,
-entry,
-conf,
-start:Date.now()
-};
-
+activeTrade={type,entry,conf,start:Date.now()};
 }
 
-// ===== UPDATE OPEN TRADE =====
-function updateOpenTrade(){
+// ===== UPDATE OPEN =====
+function updateOpen(){
 
 if(!activeTrade) return;
 
@@ -210,24 +221,23 @@ let t=(Date.now()-activeTrade.start)/1000;
 let move=(price-activeTrade.entry)/activeTrade.entry;
 if(activeTrade.type==="SELL") move*=-1;
 
-let pnl=(move*1000);
+let pnl=move*1000;
 
 document.getElementById("oType").innerText=activeTrade.type;
 document.getElementById("oEntry").innerText=activeTrade.entry.toFixed(2);
 document.getElementById("oPnl").innerText=pnl.toFixed(2);
 document.getElementById("oTime").innerText=t.toFixed(1)+"s";
 
-// enforce 10 sec hold
+// min 10s hold
 if(t<10) return;
 
-// TP / SL
 if(move>=TP || move<=-SL){
-finishTrade(price);
+finish(price);
 }
 }
 
 // ===== FINISH =====
-function finishTrade(exit){
+function finish(exit){
 
 let move=(exit-activeTrade.entry)/activeTrade.entry;
 if(activeTrade.type==="SELL") move*=-1;
@@ -254,8 +264,7 @@ function updateTable(){
 
 let html="";
 trades.slice(0,20).forEach(t=>{
-html+=`
-<tr>
+html+=`<tr>
 <td>${t.type}</td>
 <td>${t.entry.toFixed(2)}</td>
 <td>${t.exit.toFixed(2)}</td>
@@ -269,7 +278,6 @@ document.getElementById("tradeTable").innerHTML=html;
 
 // ===== STATS =====
 function updateStats(){
-
 let wins=trades.filter(t=>t.pnl>0).length;
 let total=trades.length;
 
