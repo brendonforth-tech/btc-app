@@ -72,7 +72,8 @@ let SL = 0.001;
 
 // ===== CONTROL =====
 let activeTrade = null;
-let lastSignalTime = 0;
+let lastScanTime = 0;
+let pendingSignal = null;
 
 // ===== PRICE =====
 let price=0,ticker=0,agg=0,coinbase=0,prices=[];
@@ -99,7 +100,7 @@ let d=JSON.parse(e.data);
 if(d.type==="ticker") coinbase=parseFloat(d.price)||coinbase;
 };
 
-// ===== PRICE ENGINE (SMOOTH + ACCURATE) =====
+// ===== PRICE ENGINE =====
 function updatePrice(){
 
 if(!coinbase && !ticker) return;
@@ -107,7 +108,6 @@ if(!coinbase && !ticker) return;
 let base=coinbase||ticker;
 let target=base+(agg*0.06);
 
-// smoother (less jitter)
 price+=(target-price)*0.15;
 
 prices.push(price);
@@ -117,7 +117,7 @@ document.getElementById("price").innerText="$"+price.toFixed(2);
 
 draw();
 updateOpen();
-checkSignal();
+scanMarket();
 }
 
 // ===== CHART =====
@@ -142,74 +142,73 @@ ctx.stroke();
 }
 }
 
-// ===== SMART FILTERS =====
-function noTradeZone(){
-let move=Math.abs(prices.at(-1)-prices.at(-5));
-return move>50; // too fast = skip
-}
-
-function acceleration(){
-let a=prices.at(-1),b=prices.at(-3),c=prices.at(-6);
-return Math.abs((a-b)-(b-c));
-}
-
-function fakeBreak(){
-let high=Math.max(...prices.slice(-10));
-let low=Math.min(...prices.slice(-10));
-let last=prices.at(-1);
-
-if(last>high && prices.at(-2)<high) return true;
-if(last<low && prices.at(-2)>low) return true;
-return false;
-}
-
-// ===== SIGNAL =====
-function checkSignal(){
+// ===== MARKET SCAN (EVERY 1–3 MIN) =====
+function scanMarket(){
 
 if(prices.length<30 || activeTrade) return;
 
-// spacing (~5 min)
-if(Date.now()-lastSignalTime < 300000) return;
+let now=Date.now();
 
-if(noTradeZone()) return;
+// random spacing between 1–3 min
+if(now - lastScanTime < (60000 + Math.random()*120000)) return;
 
+lastScanTime=now;
+
+// detect potential move
 let last=prices.at(-1);
 let prev=prices.at(-10);
 
 let move=(last-prev)/prev;
-let acc=acceleration();
+let vol=Math.abs(prices.at(-1)-prices.at(-2));
 
-let conf=(Math.abs(move)*15000)+(acc*900);
+let conf=(Math.abs(move)*15000)+(vol*300);
 
-// only VERY high confidence
-if(conf<90) return;
+// require strong base setup
+if(conf < 70) return;
 
-// avoid fake moves
-if(fakeBreak()) return;
+// PRE-SIGNAL
+pendingSignal = {
+type: move>0?"BUY":"SELL",
+entry:last,
+conf
+};
 
-let signal="WAIT";
-if(move>0) signal="BUY";
-if(move<0) signal="SELL";
-
-document.getElementById("signal").innerText=signal;
+document.getElementById("signal").innerText="WAIT...";
 document.getElementById("conf").innerText=conf.toFixed(0)+"%";
 
-if(signal==="WAIT") return;
-
-lastSignalTime=Date.now();
-
-// delay entry 1s
-setTimeout(()=>{
-if(!activeTrade){
-startTrade(signal,last,conf);
+// confirm after delay
+setTimeout(confirmSignal,1500);
 }
-},1000);
+
+// ===== CONFIRM =====
+function confirmSignal(){
+
+if(!pendingSignal || activeTrade) return;
+
+// re-check strength
+let last=prices.at(-1);
+let prev=prices.at(-5);
+
+let move=(last-prev)/prev;
+
+// if still valid → enter
+if(Math.abs(move) > 0.0003){
+
+startTrade(pendingSignal.type,last,pendingSignal.conf);
+
+}else{
+document.getElementById("signal").innerText="CANCELLED";
+}
+
+pendingSignal=null;
 }
 
 // ===== TRADE =====
 function startTrade(type,entry,conf){
 
 activeTrade={type,entry,conf,start:Date.now()};
+
+document.getElementById("signal").innerText=type;
 }
 
 // ===== UPDATE OPEN =====
@@ -228,9 +227,16 @@ document.getElementById("oEntry").innerText=activeTrade.entry.toFixed(2);
 document.getElementById("oPnl").innerText=pnl.toFixed(2);
 document.getElementById("oTime").innerText=t.toFixed(1)+"s";
 
-// min 10s hold
+// minimum hold
 if(t<10) return;
 
+// EARLY EXIT if momentum dies
+if(Math.abs(move) < 0.0002 && t > 12){
+finish(price);
+return;
+}
+
+// TP / SL
 if(move>=TP || move<=-SL){
 finish(price);
 }
@@ -257,6 +263,8 @@ activeTrade=null;
 
 updateTable();
 updateStats();
+
+document.getElementById("signal").innerText="WAIT";
 }
 
 // ===== TABLE =====
