@@ -3,183 +3,287 @@
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <style>
-body {background:black;color:#00ff99;font-family:monospace;margin:0;}
-#price {font-size:38px;padding:15px;}
-#status {padding:10px;font-size:14px;}
-table {width:100%;font-size:12px;}
-td {padding:4px;border-bottom:1px solid #222;}
+body {
+  background:black;
+  color:#00ff99;
+  font-family:monospace;
+  text-align:center;
+}
+
+#price {
+  font-size:42px;
+  margin-top:15px;
+}
+
+#status {
+  font-size:18px;
+  margin:10px;
+}
+
+#stats {
+  font-size:14px;
+  margin:5px;
+}
+
+button {
+  padding:10px;
+  margin:5px;
+}
+
+table {
+  width:100%;
+  font-size:12px;
+  margin-top:10px;
+}
+
+td {
+  border-bottom:1px solid #222;
+  padding:4px;
+}
 </style>
 </head>
 
 <body>
 
-<div id="price">Connecting...</div>
+<div id="price">Loading...</div>
 <div id="status">WAITING</div>
+<div id="stats">WR: 0% | Trades: 0</div>
+
+<button onclick="togglePredict()">Prediction: OFF</button>
+
 <table id="trades"></table>
 
 <script>
 
-const API = "https://btc-server-3eh2.onrender.com/price";
+const SERVER = "https://btc-server-3eh2.onrender.com/price";
 
-let price = 0;
-let prices = [];
+// ===== DISPLAY =====
+let display = 0;
+let history = [];
+let predict = false;
 
-let active = null;
+// ===== TRADING =====
+let activeTrade = null;
+let pendingEntry = null;
+
 let trades = [];
 let wins = 0;
 let total = 0;
 
-let nextTrade = Date.now();
+let nextSignalTime = Date.now();
 
-// ===== FETCH =====
-async function get(){
+// ===== TOGGLE =====
+function togglePredict(){
+  predict = !predict;
+  document.querySelector("button").innerText =
+    "Prediction: " + (predict ? "ON" : "OFF");
+}
+
+// ===== FETCH PRICE =====
+async function fetchPrice(){
 
 try{
 
-let r = await fetch(API);
-let d = await r.json();
+let res = await fetch(SERVER);
+let data = await res.json();
 
-let p = d.price;
+let price = data.price;
 
-// smooth UI
-price += (p - price) * 0.45;
+// ===== STORE HISTORY =====
+history.push(price);
+if(history.length > 60) history.shift();
 
-prices.push(price);
-if(prices.length > 200) prices.shift();
+// ===== MOMENTUM =====
+let fast = history.at(-1) - history.at(-3) || 0;
+let mid  = history.at(-1) - history.at(-10) || 0;
+let slow = history.at(-1) - history.at(-25) || 0;
+
+// ===== VOLATILITY =====
+let vol = Math.abs(history.at(-1) - history.at(-6));
+
+// ===== PREDICTION =====
+let target = price;
+
+if(predict && Math.abs(fast) > 3){
+  target = price + fast * 0.3;
+}
+
+// ===== SMOOTH DISPLAY =====
+display += (target - display) * 0.35;
 
 document.getElementById("price").innerText =
-"$" + price.toFixed(2);
+"$" + display.toFixed(2);
 
-signals();
+// ===== SIGNAL ENGINE =====
+runSignals(price, fast, mid, slow, vol);
 
-}catch{
+}catch(e){
 document.getElementById("price").innerText = "Reconnecting...";
 }
 
 }
 
-// ===== ELITE SIGNAL ENGINE =====
-function signals(){
+// ===== SIGNAL LOGIC =====
+function runSignals(price, fast, mid, slow, vol){
 
-if(prices.length < 30) return;
+if(history.length < 30) return;
 
-let f = prices.at(-1) - prices.at(-3);
-let m = prices.at(-1) - prices.at(-8);
-let s = prices.at(-1) - prices.at(-20);
-
-// volatility filter
-if(Math.abs(prices.at(-1)-prices.at(-2)) > 10){
-  set("NO TRADE");
+// ===== VOL FILTER =====
+if(vol > 25){
+  setStatus("NO TRADE");
   return;
 }
 
-// confidence
-let c = 0;
+// ===== TREND =====
+let up = fast > 0 && mid > 0 && slow > 0;
+let down = fast < 0 && mid < 0 && slow < 0;
 
-if(Math.sign(f) === Math.sign(m)) c+=30;
-if(Math.sign(m) === Math.sign(s)) c+=30;
-if(Math.abs(f)>2) c+=20;
-if(Math.abs(m)>4) c+=20;
+// ===== TRAP DETECTION =====
+let spike = history.at(-1) - history.at(-2);
+let reverse = history.at(-1) - history.at(-5);
 
-// ===== ACTIVE =====
-if(active){
+let trap =
+  Math.abs(spike) > 8 &&
+  Math.sign(spike) !== Math.sign(reverse);
 
-let t = (Date.now()-active.time)/1000;
+// ===== CONFIDENCE =====
+let conf = 0;
 
-if(t < 10){
-  set("HOLD " + active.side);
+if(up || down) conf += 40;
+if(Math.abs(fast) > 2) conf += 15;
+if(Math.abs(mid) > 5) conf += 15;
+if(!trap) conf += 15;
+if(vol < 12) conf += 15;
+
+// ===== HANDLE ENTRY DELAY =====
+if(pendingEntry && !activeTrade){
+
+if(Date.now() >= pendingEntry.time){
+
+activeTrade = {
+  side: pendingEntry.side,
+  entry: price,
+  start: Date.now(),
+  conf: pendingEntry.conf
+};
+
+pendingEntry = null;
+
+setStatus("ENTER " + activeTrade.side);
+
+}
+
+return;
+}
+
+// ===== ACTIVE TRADE =====
+if(activeTrade){
+
+let held = (Date.now() - activeTrade.start)/1000;
+
+// HOLD MIN
+if(held < 10){
+  setStatus("HOLD " + activeTrade.side + " (" + held.toFixed(1)+"s)");
   return;
 }
 
-let rev = prices.at(-1) - prices.at(-5);
-
+// EXIT
 let exit =
-  (active.side==="BUY" && rev<-2) ||
-  (active.side==="SELL" && rev>2) ||
-  t > 20;
+  (activeTrade.side === "BUY" && fast < -2) ||
+  (activeTrade.side === "SELL" && fast > 2) ||
+  held > 15;
 
-if(!exit) return;
+if(exit){
 
-// close
-let pnl = price - active.entry;
-if(active.side==="SELL") pnl*=-1;
+let pnl = price - activeTrade.entry;
+if(activeTrade.side === "SELL") pnl *= -1;
 
 total++;
-if(pnl>0) wins++;
+if(pnl > 0) wins++;
 
 trades.unshift({
-  side: active.side,
-  entry: active.entry,
+  side: activeTrade.side,
+  entry: activeTrade.entry,
   exit: price,
   pnl: pnl.toFixed(2),
-  conf: active.conf
+  conf: activeTrade.conf
 });
 
-active=null;
+activeTrade = null;
 
-set("CLOSED | WR " + Math.round((wins/total)*100)+"%");
-render();
+updateStats();
+renderTrades();
 
-nextTrade = Date.now() + 8000 + Math.random()*10000;
+setStatus("CLOSED");
+
+// spacing between trades
+nextSignalTime = Date.now() + 60000;
+
+}
 
 return;
 }
 
 // ===== WAIT =====
-if(Date.now() < nextTrade){
-  set("WAIT");
+if(Date.now() < nextSignalTime){
+  setStatus("WAIT");
   return;
 }
 
 // ===== PRE =====
-if(c>=75 && c<90){
-  set("PRE " + c + "%");
+if(conf >= 75 && conf < 95){
+  setStatus("PRE " + conf + "%");
   return;
 }
 
 // ===== ENTER =====
-if(c>=90){
+if(conf >= 95){
 
-let side = f>0 ? "BUY" : "SELL";
+let side = up ? "BUY" : "SELL";
 
-active = {
+setStatus("WAIT ENTRY");
+
+// 1 second real entry delay
+pendingEntry = {
   side,
-  entry: price,
-  time: Date.now(),
-  conf: c
+  conf,
+  time: Date.now() + 1000
 };
-
-set("ENTER " + side + " " + c + "%");
 
 }
 
 }
 
 // ===== UI =====
-function set(t){
+function setStatus(t){
   document.getElementById("status").innerText = t;
 }
 
-function render(){
+function updateStats(){
+  let wr = total ? Math.round((wins/total)*100) : 0;
+  document.getElementById("stats").innerText =
+    "WR: " + wr + "% | Trades: " + total;
+}
 
-let h="<tr><td>Side</td><td>Entry</td><td>Exit</td><td>PnL</td><td>Conf</td></tr>";
+function renderTrades(){
 
-trades.slice(0,10).forEach(x=>{
-h+=`<tr>
-<td>${x.side}</td>
-<td>${x.entry.toFixed(2)}</td>
-<td>${x.exit.toFixed(2)}</td>
-<td>${x.pnl}</td>
-<td>${x.conf}%</td>
+let html = "<tr><td>Side</td><td>Entry</td><td>Exit</td><td>PnL</td><td>Conf</td></tr>";
+
+trades.slice(0,10).forEach(t=>{
+html += `<tr>
+<td>${t.side}</td>
+<td>${t.entry.toFixed(2)}</td>
+<td>${t.exit.toFixed(2)}</td>
+<td>${t.pnl}</td>
+<td>${t.conf}%</td>
 </tr>`;
 });
 
-document.getElementById("trades").innerHTML = h;
-
+document.getElementById("trades").innerHTML = html;
 }
 
 // ===== LOOP =====
-setInterval(get, 120);
+setInterval(fetchPrice, 120);
 
 </script>
 
