@@ -3,324 +3,138 @@
 <head>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <style>
-body { margin:0; background:black; color:#00ff99; font-family:monospace; }
-#price { font-size:32px; padding:10px; }
-#signal { font-size:20px; font-weight:bold; }
-
-.wait{color:yellow;}
-.buy{color:#00ff00;}
-.sell{color:#ff3333;}
-.closed{color:#00ccff;}
-.build{color:#ffaa00;}
-
-#chart{width:100%;height:260px;}
-#panel{padding:10px;}
-
-#openTrade{
-border:1px solid #0f0;
-margin:10px;
-padding:10px;
+body {
+  margin:0;
+  background:black;
+  color:#00ff99;
+  font-family:monospace;
 }
 
-table{width:100%;border-collapse:collapse;}
-td,th{
-border:1px solid #0f0;
-padding:5px;
-text-align:center;
-font-size:12px;
+#topbar {
+  padding:10px;
+}
+
+button {
+  margin-right:5px;
+  padding:6px;
+  background:#111;
+  color:#0f0;
+  border:1px solid #0f0;
+}
+
+#price {
+  font-size:32px;
+  padding:10px;
+}
+
+#modeLabel {
+  margin-left:10px;
 }
 </style>
 </head>
 
 <body>
 
-<div id="price">Connecting...</div>
-
-<div id="panel">
-Signal: <span id="signal" class="wait">WAITING FOR POSITION</span> |
-Confidence: <span id="conf">0%</span> |
-Winrate: <span id="wr">0%</span> |
-Balance: $<span id="bal">1000</span><br>
-Next Scan: <span id="timer">--</span>
+<div id="topbar">
+  <button onclick="setMode('match')">MATCH</button>
+  <button onclick="setMode('fast')">FAST</button>
+  <button onclick="setMode('auto')">AUTO</button>
+  <span id="modeLabel">Mode: AUTO</span>
 </div>
 
-<canvas id="chart"></canvas>
-
-<div id="openTrade">
-<b>Open Position</b><br>
-Type: <span id="oType">NONE</span><br>
-Entry: <span id="oEntry">-</span><br>
-PnL: <span id="oPnl">-</span><br>
-Time: <span id="oTime">0s</span>
-</div>
-
-<table>
-<thead>
-<tr>
-<th>Type</th><th>Entry</th><th>Exit</th><th>PnL</th><th>Conf</th>
-</tr>
-</thead>
-<tbody id="tradeTable"></tbody>
-</table>
+<div id="price">Loading...</div>
 
 <script>
 
-// ===== TELEGRAM =====
-const TELEGRAM_TOKEN = "PASTE_TOKEN";
-const CHAT_ID = "PASTE_CHAT";
+// ===== MODE =====
+let mode = "auto";
 
-function tg(msg){
-fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,{
-method:"POST",
-headers:{"Content-Type":"application/json"},
-body:JSON.stringify({chat_id:CHAT_ID,text:msg})
-});
+// ===== PRICE =====
+let price = 0;
+let prices = [];
+
+// ===== SWITCH MODE =====
+function setMode(m){
+  mode = m;
+  document.getElementById("modeLabel").innerText =
+    "Mode: " + m.toUpperCase();
 }
 
-// ===== STATE =====
-let price=0, ticker=0, agg=0, coinbase=0;
-let prices=[], velocity=[], accel=[];
+// ===== AUTO MODE LOGIC =====
+function getAutoMode(){
+  if(prices.length < 10) return "match";
 
-let active=null;
-let trades=[];
-let balance=1000;
+  let momentum = prices[prices.length-1] - prices[prices.length-6];
 
-// ===== FEEDS =====
-new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@ticker")
-.onmessage=e=>ticker=parseFloat(JSON.parse(e.data).c)||ticker;
+  // strong move → go fast
+  if(Math.abs(momentum) > 10){
+    return "fast";
+  }
 
-new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@aggTrade")
-.onmessage=e=>{
-let p=parseFloat(JSON.parse(e.data).p);
-if(!isNaN(p)) agg=p-ticker;
-};
-
-const cb=new WebSocket("wss://ws-feed.exchange.coinbase.com");
-cb.onopen=()=>cb.send(JSON.stringify({
-type:"subscribe",product_ids:["BTC-USD"],channels:["ticker"]
-}));
-cb.onmessage=e=>{
-let d=JSON.parse(e.data);
-if(d.type==="ticker") coinbase=parseFloat(d.price)||coinbase;
-};
-
-// ===== SIGNAL UI =====
-function setSignal(t,c){
-let el=document.getElementById("signal");
-el.innerText=t;
-el.className=c;
+  return "match";
 }
 
-// ===== PRICE ENGINE (ANTI-FAKE) =====
-function update(){
+// ===== PRICE ENGINE =====
+async function fetchPrice(){
 
-if(!coinbase&&!ticker) return;
+try{
 
-let base=coinbase||ticker;
-let raw=base+(agg*0.05);
+let res = await fetch("https://btc-server-3eh2.onrender.com/price");
+let data = await res.json();
 
-// adaptive smoothing
-let diff=Math.abs(raw-price);
-let alpha = diff>20 ? 0.25 : 0.1;
+let newPrice = data.price;
 
-price += (raw-price)*alpha;
+// ===== PICK MODE =====
+let currentMode = mode === "auto" ? getAutoMode() : mode;
 
-// micro-noise filter
-if(Math.abs(price - prices.at(-1)) < 2){
-price = prices.at(-1) || price;
+// ===== MATCH MODE =====
+if(currentMode === "match"){
+
+  let diff = newPrice - price;
+  let strength = Math.abs(diff) > 10 ? 0.5 : 0.25;
+
+  price += diff * strength;
+
+  // hard clamp
+  if(Math.abs(price - newPrice) > 20){
+    price = newPrice;
+  }
 }
 
+// ===== FAST MODE =====
+if(currentMode === "fast"){
+
+  let momentum = prices.length > 5
+    ? (prices[prices.length-1] - prices[prices.length-5])
+    : 0;
+
+  let lead = momentum * 0.6;
+
+  let target = newPrice + lead;
+
+  let diff = target - price;
+
+  price += diff * 0.35;
+}
+
+// ===== SAVE =====
 prices.push(price);
-if(prices.length>200) prices.shift();
+if(prices.length > 200) prices.shift();
 
-// ===== VELOCITY =====
-let v = prices.length>1 ? price - prices.at(-2) : 0;
-velocity.push(v);
-if(velocity.length>50) velocity.shift();
+// ===== DISPLAY =====
+document.getElementById("price").innerText =
+"$" + price.toFixed(2);
 
-// ===== ACCEL =====
-let a = velocity.length>1 ? velocity.at(-1) - velocity.at(-2) : 0;
-accel.push(a);
-if(accel.length>50) accel.shift();
-
-document.getElementById("price").innerText="$"+price.toFixed(2);
-
-draw();
-logic();
-updateTrade();
+}catch(e){
+console.log("server error");
 }
 
-// ===== LOGIC =====
-function logic(){
-
-if(prices.length<20 || active) return;
-
-// ===== BUILD =====
-let range = Math.abs(prices.at(-1)-prices.at(-8));
-if(range<10){
-setSignal("BUILDING...","build");
-return;
 }
 
-// ===== MOMENTUM =====
-let vAvg = velocity.slice(-5).reduce((a,b)=>a+b,0)/5;
-let aNow = accel.at(-1);
-
-// ===== FAKE SPIKE FILTER =====
-let spike = Math.abs(velocity.at(-1))>25 && Math.abs(accel.at(-1))<0;
-
-// ===== DIRECTION CONFIRM =====
-let consistent =
-velocity.slice(-4).every(v=>v>0) ||
-velocity.slice(-4).every(v=>v<0);
-
-if(spike || !consistent) return;
-
-// ===== CONF SCORE =====
-let conf = Math.abs(vAvg)*5 + Math.abs(aNow)*10;
-
-if(conf < 25) return;
-
-// ===== SIGNAL =====
-let type = vAvg>0 ? "BUY" : "SELL";
-
-setSignal("WAIT...","wait");
-
-setTimeout(()=>{
-enter(type, price, conf);
-},1000);
-}
-
-// ===== ENTER =====
-function enter(type,entry,conf){
-
-if(active) return;
-
-active={
-type,
-entry,
-start:Date.now(),
-pnlOn:false
-};
-
-setSignal(type, type==="BUY"?"buy":"sell");
-
-tg(`🚨 ${type} @ ${entry.toFixed(2)}`);
-
-setTimeout(()=>{ if(active) active.pnlOn=true; },1000);
-}
-
-// ===== UPDATE TRADE =====
-function updateTrade(){
-
-if(!active) return;
-
-let t=(Date.now()-active.start)/1000;
-
-let move=0;
-if(active.pnlOn){
-move=(price-active.entry)/active.entry;
-if(active.type==="SELL") move*=-1;
-}
-
-let pnl=move*1000;
-
-document.getElementById("oType").innerText=active.type;
-document.getElementById("oEntry").innerText=active.entry.toFixed(2);
-document.getElementById("oPnl").innerText=pnl.toFixed(2);
-document.getElementById("oTime").innerText=t.toFixed(1);
-
-// hold minimum
-if(t<10) return;
-
-// exit logic
-if(Math.abs(move)<0.0002 && t>12){
-close(price);
-return;
-}
-
-if(move>0.002 || move<-0.001){
-close(price);
-}
-}
-
-// ===== CLOSE =====
-function close(exit){
-
-let move=(exit-active.entry)/active.entry;
-if(active.type==="SELL") move*=-1;
-
-let pnl=move*1000;
-balance+=pnl;
-
-tg(`✅ CLOSED ${active.type} PnL ${pnl.toFixed(2)}`);
-
-trades.unshift({
-type:active.type,
-entry:active.entry,
-exit,
-pnl
-});
-
-active=null;
-
-setSignal("POSITION CLOSED","closed");
-
-updateTable();
-updateStats();
-}
-
-// ===== TABLE =====
-function updateTable(){
-let html="";
-trades.slice(0,20).forEach(t=>{
-html+=`<tr>
-<td>${t.type}</td>
-<td>${t.entry.toFixed(2)}</td>
-<td>${t.exit.toFixed(2)}</td>
-<td>${t.pnl.toFixed(2)}</td>
-<td>-</td>
-</tr>`;
-});
-document.getElementById("tradeTable").innerHTML=html;
-}
-
-// ===== STATS =====
-function updateStats(){
-let wins=trades.filter(t=>t.pnl>0).length;
-let total=trades.length;
-
-document.getElementById("wr").innerText=
-total?(wins/total*100).toFixed(1)+"%":"0%";
-
-document.getElementById("bal").innerText=balance.toFixed(2);
-}
-
-// ===== CHART =====
-const ctx=document.getElementById("chart").getContext("2d");
-
-function draw(){
-ctx.clearRect(0,0,window.innerWidth,260);
-if(prices.length<5) return;
-
-let max=Math.max(...prices),min=Math.min(...prices);
-
-for(let i=1;i<prices.length;i++){
-let x=i*(window.innerWidth/prices.length);
-let y1=260-(prices[i-1]-min)/(max-min)*260;
-let y2=260-(prices[i]-min)/(max-min)*260;
-
-ctx.beginPath();
-ctx.moveTo(x,y1);
-ctx.lineTo(x,y2);
-ctx.strokeStyle=prices[i]>prices[i-1]?"#0f0":"#f00";
-ctx.stroke();
-}
-}
-
-// ===== INIT =====
-setInterval(update,50);
+// ===== LOOP =====
+setInterval(fetchPrice, 120);
 
 </script>
+
 </body>
 </html>
