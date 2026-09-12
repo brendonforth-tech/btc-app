@@ -4,81 +4,45 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <style>
 body {background:black;color:#00ff99;font-family:monospace;margin:0;}
-#topbar {padding:10px;}
-button {margin-right:5px;padding:6px;background:#111;color:#0f0;border:1px solid #0f0;}
-#price {font-size:32px;padding:10px;}
-#status {padding:10px;}
-table {width:100%;font-size:12px;color:#0f0;}
+#price {font-size:38px;padding:15px;}
+#status {padding:10px;font-size:14px;}
+table {width:100%;font-size:12px;}
 td {padding:4px;border-bottom:1px solid #222;}
 </style>
 </head>
 
 <body>
 
-<div id="topbar">
-<button onclick="setMode('match')">MATCH</button>
-<button onclick="setMode('fast')">FAST</button>
-<button onclick="setMode('auto')">AUTO</button>
-<span id="modeLabel">Mode: AUTO</span>
-</div>
-
 <div id="price">Connecting...</div>
 <div id="status">WAITING</div>
-
 <table id="trades"></table>
 
 <script>
 
-const SERVER = "https://btc-server-3eh2.onrender.com/price";
+const API = "https://btc-server-3eh2.onrender.com/price";
 
-let mode = "auto";
 let price = 0;
 let prices = [];
 
-let activeTrade = null;
+let active = null;
 let trades = [];
 let wins = 0;
 let total = 0;
 
-let nextSignalTime = Date.now();
-
-// ===== MODE =====
-function setMode(m){
-  mode = m;
-  document.getElementById("modeLabel").innerText =
-    "Mode: " + m.toUpperCase();
-}
+let nextTrade = Date.now();
 
 // ===== FETCH =====
-async function fetchPrice(){
+async function get(){
 
 try{
 
-let res = await fetch(SERVER);
-let data = await res.json();
+let r = await fetch(API);
+let d = await r.json();
 
-let newPrice = data.price;
-let binance = data.binance || newPrice;
+let p = d.price;
 
-// ===== MODE LOGIC =====
-let target = newPrice;
-
-if(mode === "fast"){
-  // small lead only (NO DRIFT)
-  let lead = (binance - newPrice) * 0.25;
-  target = newPrice + lead;
-}
-
-if(mode === "auto"){
-  let momentum = prices.length > 5 ? prices.at(-1) - prices.at(-5) : 0;
-  if(Math.abs(momentum) > 6){
-    let lead = (binance - newPrice) * 0.2;
-    target = newPrice + lead;
-  }
-}
-
-// smooth update
-price += (target - price) * 0.5;
+// smooth UI
+price += (p - price) * 0.45;
 
 prices.push(price);
 if(prices.length > 200) prices.shift();
@@ -86,140 +50,136 @@ if(prices.length > 200) prices.shift();
 document.getElementById("price").innerText =
 "$" + price.toFixed(2);
 
-// run signals
-runSignals();
+signals();
 
-}catch(e){
+}catch{
 document.getElementById("price").innerText = "Reconnecting...";
 }
 
 }
 
-// ===== FINAL BOSS SIGNALS =====
-function runSignals(){
+// ===== ELITE SIGNAL ENGINE =====
+function signals(){
 
-if(prices.length < 25) return;
+if(prices.length < 30) return;
 
-// metrics
-let fast = prices.at(-1) - prices.at(-3);
-let mid = prices.at(-1) - prices.at(-8);
-let slow = prices.at(-1) - prices.at(-20);
+let f = prices.at(-1) - prices.at(-3);
+let m = prices.at(-1) - prices.at(-8);
+let s = prices.at(-1) - prices.at(-20);
 
 // volatility filter
-let vol = Math.abs(prices.at(-1) - prices.at(-2));
-if(vol > 12){
-  setStatus("NO TRADE");
+if(Math.abs(prices.at(-1)-prices.at(-2)) > 10){
+  set("NO TRADE");
   return;
 }
 
 // confidence
-let conf = 0;
+let c = 0;
 
-if(Math.sign(fast) === Math.sign(mid)) conf += 30;
-if(Math.sign(mid) === Math.sign(slow)) conf += 30;
-if(Math.abs(fast) > 2) conf += 20;
-if(Math.abs(mid) > 5) conf += 20;
+if(Math.sign(f) === Math.sign(m)) c+=30;
+if(Math.sign(m) === Math.sign(s)) c+=30;
+if(Math.abs(f)>2) c+=20;
+if(Math.abs(m)>4) c+=20;
 
-// ===== ACTIVE TRADE =====
-if(activeTrade){
+// ===== ACTIVE =====
+if(active){
 
-let held = (Date.now() - activeTrade.time)/1000;
+let t = (Date.now()-active.time)/1000;
 
-// hold minimum
-if(held < 10){
-  setStatus("HOLD " + activeTrade.side);
+if(t < 10){
+  set("HOLD " + active.side);
   return;
 }
 
-// exit logic
-let reverse = prices.at(-1) - prices.at(-5);
+let rev = prices.at(-1) - prices.at(-5);
 
 let exit =
-  (activeTrade.side === "BUY" && reverse < -2) ||
-  (activeTrade.side === "SELL" && reverse > 2) ||
-  held > 20;
+  (active.side==="BUY" && rev<-2) ||
+  (active.side==="SELL" && rev>2) ||
+  t > 20;
 
 if(!exit) return;
 
 // close
-let pnl = price - activeTrade.entry;
-if(activeTrade.side === "SELL") pnl *= -1;
+let pnl = price - active.entry;
+if(active.side==="SELL") pnl*=-1;
 
 total++;
-if(pnl > 0) wins++;
+if(pnl>0) wins++;
 
 trades.unshift({
-  side: activeTrade.side,
-  entry: activeTrade.entry,
+  side: active.side,
+  entry: active.entry,
   exit: price,
   pnl: pnl.toFixed(2),
-  conf: activeTrade.conf
+  conf: active.conf
 });
 
-activeTrade = null;
+active=null;
 
-setStatus("CLOSED | WR " + Math.round((wins/total)*100) + "%");
-renderTrades();
+set("CLOSED | WR " + Math.round((wins/total)*100)+"%");
+render();
 
-nextSignalTime = Date.now() + 8000 + Math.random()*12000;
+nextTrade = Date.now() + 8000 + Math.random()*10000;
 
 return;
 }
 
 // ===== WAIT =====
-if(Date.now() < nextSignalTime){
-  setStatus("WAIT");
+if(Date.now() < nextTrade){
+  set("WAIT");
   return;
 }
 
 // ===== PRE =====
-if(conf >= 75 && conf < 90){
-  setStatus("PRE " + conf + "%");
+if(c>=75 && c<90){
+  set("PRE " + c + "%");
   return;
 }
 
 // ===== ENTER =====
-if(conf >= 90){
+if(c>=90){
 
-let side = fast > 0 ? "BUY" : "SELL";
+let side = f>0 ? "BUY" : "SELL";
 
-activeTrade = {
+active = {
   side,
   entry: price,
   time: Date.now(),
-  conf: conf
+  conf: c
 };
 
-setStatus("ENTER " + side + " " + conf + "%");
+set("ENTER " + side + " " + c + "%");
 
 }
 
 }
 
 // ===== UI =====
-function setStatus(t){
+function set(t){
   document.getElementById("status").innerText = t;
 }
 
-function renderTrades(){
+function render(){
 
-let html = "<tr><td>Side</td><td>Entry</td><td>Exit</td><td>PnL</td><td>Conf</td></tr>";
+let h="<tr><td>Side</td><td>Entry</td><td>Exit</td><td>PnL</td><td>Conf</td></tr>";
 
-trades.slice(0,10).forEach(t=>{
-html += `<tr>
-<td>${t.side}</td>
-<td>${t.entry.toFixed(2)}</td>
-<td>${t.exit.toFixed(2)}</td>
-<td>${t.pnl}</td>
-<td>${t.conf}%</td>
+trades.slice(0,10).forEach(x=>{
+h+=`<tr>
+<td>${x.side}</td>
+<td>${x.entry.toFixed(2)}</td>
+<td>${x.exit.toFixed(2)}</td>
+<td>${x.pnl}</td>
+<td>${x.conf}%</td>
 </tr>`;
 });
 
-document.getElementById("trades").innerHTML = html;
+document.getElementById("trades").innerHTML = h;
+
 }
 
 // ===== LOOP =====
-setInterval(fetchPrice, 120);
+setInterval(get, 120);
 
 </script>
 
